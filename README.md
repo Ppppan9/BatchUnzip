@@ -12,7 +12,7 @@ macOS 上的批量解压工具：在 Finder 里**选中多个压缩包 → 右�
 
 两种方式任选：
 
-1. **直接下载**（无需编译）：到 [Releases](../../releases) 下载 `BatchUnzip-vX.X-macOS-arm64.zip`，解压得到「批量解压.app」，拖进「应用程序」文件夹。应用使用 ad-hoc 签名（无 Apple 开发者公证），首次打开需在终端执行：
+1. **直接下载**（推荐）：到 [Releases](../../releases) 下载 `BatchUnzip-vX.X-macOS-arm64.zip`，解压得到「批量解压.app」，拖进「应用程序」文件夹。**应用内置 7-Zip 解压引擎，下载即用、全格式支持，无需安装任何依赖。** 应用使用 ad-hoc 签名（无 Apple 开发者公证），首次打开需在终端执行：
 
    ```bash
    xattr -cr /Applications/批量解压.app
@@ -20,7 +20,9 @@ macOS 上的批量解压工具：在 Finder 里**选中多个压缩包 → 右�
 
    或者：右键点击应用 →「打开」→ 再点「打开」。
 
-2. **自己构建**：克隆本仓库后运行 `./build.sh`（需要 Xcode Command Line Tools），脚本会自动编译、生成图标、签名并安装到 /Applications。仅支持 Apple Silicon（arm64）。
+2. **自己构建**：克隆本仓库后运行 `./build.sh`（需要 Xcode Command Line Tools），脚本会自动编译、生成图标、嵌入内置引擎并安装到 /Applications。仅支持 Apple Silicon（arm64）。
+
+> 内置引擎说明：应用打包了 7-Zip 官方命令行引擎 `7zz`（未修改的官方 arm64 二进制），解压优先使用它；系统里装有 unar 时 zip 会优先走 unar（GBK 乱码修复更强）。引擎许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 ## 使用方法
 
@@ -69,15 +71,15 @@ macOS 上的批量解压工具：在 Finder 里**选中多个压缩包 → 右�
 
 ## 解压后端
 
-应用按格式自动选择本机可用的命令行工具，失败自动降级：
+应用按格式自动选择引擎，失败自动降级。**应用内置 7-Zip 官方引擎（`7zz`），开箱即支持全部格式**；系统里另装的引擎会作为补充：
 
 | 格式 | 优先顺序 |
 |---|---|
-| rar / 7z / cab | unar → 7zz(7-Zip) → unrar |
-| zip | unar（自动修复 GBK 文件名乱码）→ 7zz → unzip |
-| tar / gz / bz2 / xz 等 | bsdtar（系统自带）→ unar → 7zz |
+| rar / 7z / cab | **内置 7zz** → unar → unrar |
+| zip | unar（自动修复 GBK 文件名乱码）→ **内置 7zz** → unzip |
+| tar / gz / bz2 / xz 等 | bsdtar（系统自带）→ unar → **内置 7zz** |
 
-**本机已装 7zz 即可解 rar/7z。** 若都没装，应用首次解压 rar/7z 时会弹窗询问是否通过 Homebrew 自动安装（`brew install unar 7zip`）；推荐两个都装——unar 能自动识别老式 GBK 编码 zip 的中文文件名，避免乱码。
+若都没有内置引擎（自行构建且未 vendor），首次解压 rar/7z 时会弹窗询问是否通过 Homebrew 自动安装。
 
 ## 命令行模式
 

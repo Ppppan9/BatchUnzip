@@ -33,11 +33,29 @@ func findExecutable(_ names: [String]) -> String? {
     return nil
 }
 
+// 应用包内置的引擎（vendor 进 app 的官方 7zz），优先于系统安装的版本——
+// 让 Release 下载的用户不装任何依赖就是全格式
+func bundledTool(_ name: String) -> String? {
+    guard let execURL = Bundle.main.executableURL else { return nil }
+    let p = execURL.deletingLastPathComponent().appendingPathComponent(name).path
+    return fm.isExecutableFile(atPath: p) ? p : nil
+}
+
 var unarPath = findExecutable(["unar"])
-var sevenZipPath = findExecutable(["7zz", "7z"])
+var sevenZipPath = bundledTool("7zz") ?? findExecutable(["7zz", "7z"])
+var sevenZipBundled = sevenZipPath != nil && sevenZipPath == bundledTool("7zz")
 var unrarPath = findExecutable(["unrar"])
 var unzipPath = findExecutable(["unzip"])
 let bsdtarPath = "/usr/bin/bsdtar"
+
+/// 安装/环境变化后重新检测引擎
+func rediscoverEngines() {
+    unarPath = findExecutable(["unar"])
+    sevenZipPath = bundledTool("7zz") ?? findExecutable(["7zz", "7z"])
+    sevenZipBundled = sevenZipPath != nil && sevenZipPath == bundledTool("7zz")
+    unrarPath = findExecutable(["unrar"])
+    unzipPath = findExecutable(["unzip"])
+}
 
 func ext(_ path: String) -> String {
     (path as NSString).pathExtension.lowercased()
@@ -174,6 +192,7 @@ struct Backend {
 
 func backendsFor(path: String) -> [Backend] {
     var list: [Backend] = []
+    let sevenZipName = sevenZipBundled ? "7-Zip (内置)" : "7-Zip"
     let e = ext(path)
     switch e {
     case "rar":
@@ -183,14 +202,14 @@ func backendsFor(path: String) -> [Backend] {
             }))
         }
         if let s = sevenZipPath {
-            list.append(Backend(name: "7-Zip", path: s, makeArgs: { outDir, pwd, p in
+            list.append(Backend(name: sevenZipName, path: s, makeArgs: { outDir, pwd, p in
                 sevenZipArgs(outDir: outDir, password: pwd, path: p)
             }))
         }
         if let r = unrarPath { list.append(Backend(name: "unrar", path: r, makeArgs: unrarArgs)) }
     case "7z":
         if let s = sevenZipPath {
-            list.append(Backend(name: "7-Zip", path: s, makeArgs: { outDir, pwd, p in
+            list.append(Backend(name: sevenZipName, path: s, makeArgs: { outDir, pwd, p in
                 sevenZipArgs(outDir: outDir, password: pwd, path: p)
             }))
         }
@@ -206,7 +225,7 @@ func backendsFor(path: String) -> [Backend] {
             }))
         }
         if let s = sevenZipPath {
-            list.append(Backend(name: "7-Zip", path: s, makeArgs: { outDir, pwd, p in
+            list.append(Backend(name: sevenZipName, path: s, makeArgs: { outDir, pwd, p in
                 sevenZipArgs(outDir: outDir, password: pwd, path: p)
             }))
         }
@@ -223,7 +242,7 @@ func backendsFor(path: String) -> [Backend] {
             }))
         }
         if let s = sevenZipPath {
-            list.append(Backend(name: "7-Zip", path: s, makeArgs: { outDir, pwd, p in
+            list.append(Backend(name: sevenZipName, path: s, makeArgs: { outDir, pwd, p in
                 sevenZipArgs(outDir: outDir, password: pwd, path: p)
             }))
         }
@@ -234,7 +253,7 @@ func backendsFor(path: String) -> [Backend] {
             }))
         }
         if let s = sevenZipPath {
-            list.append(Backend(name: "7-Zip", path: s, makeArgs: { outDir, pwd, p in
+            list.append(Backend(name: sevenZipName, path: s, makeArgs: { outDir, pwd, p in
                 sevenZipArgs(outDir: outDir, password: pwd, path: p)
             }))
         }
@@ -303,7 +322,7 @@ func extractOne(_ path: String, password userPassword: String, deleteArchiveOnSu
             let args = b.makeArgs(outDir, pwd, path)
             logLine("解压 \(displayName) | 后端 \(b.name) | 密码：\(pwd.isEmpty ? "无" : "已提供")")
             let r: (code: Int32, err: String)
-            if b.name == "7-Zip", let cb = onFileProgress {
+            if b.name.hasPrefix("7-Zip"), let cb = onFileProgress {
                 r = runProcessWithProgress(b.path,
                                            sevenZipArgs(outDir: outDir, password: pwd, path: path, withProgress: true),
                                            onPercent: cb)
@@ -1221,10 +1240,7 @@ final class Coordinator: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             _ = runProcess(brew, ["install", "-q"] + formulas)
             // 重新检测
-            unarPath = findExecutable(["unar"])
-            sevenZipPath = findExecutable(["7zz", "7z"])
-            unrarPath = findExecutable(["unrar"])
-            unzipPath = findExecutable(["unzip"])
+            rediscoverEngines()
             DispatchQueue.main.async {
                 self?.panel?.close()
                 self?.panel = nil

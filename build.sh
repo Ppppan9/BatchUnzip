@@ -25,6 +25,14 @@ rm -rf build/AppIcon.iconset
 swift make_icon.swift build/AppIcon.iconset >/dev/null
 iconutil -c icns build/AppIcon.iconset -o "$APP_DIR/Contents/Resources/AppIcon.icns"
 
+echo "==> 内置 7-Zip 引擎…"
+if [ -f vendor/7zz ]; then
+    cp vendor/7zz "$APP_DIR/Contents/MacOS/7zz"
+    chmod +x "$APP_DIR/Contents/MacOS/7zz"
+else
+    echo "⚠️  vendor/7zz 缺失，应用将回退到系统解压引擎（rar/7z 需另装 unar 或 7-Zip）"
+fi
+
 echo "==> 签名…"
 codesign --force -s - "$APP_DIR"
 
