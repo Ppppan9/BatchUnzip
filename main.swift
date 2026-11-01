@@ -6,8 +6,10 @@ import AppKit
 
 let fm = FileManager.default
 // .001~.099 是 7z/zip 等分卷的编号扩展名：首卷(.001)可直接解压，后续卷由 isContinuationVolume 跳过
+// apk/ipa/jar 是 zip 容器；dmg/iso/wim 是磁盘镜像（dmg 走 hdiutil，iso/wim 走内置 7zz）
 var archiveExtensions: Set<String> = [
     "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz", "z", "lzma", "cab",
+    "dmg", "iso", "wim", "apk", "ipa", "jar",
 ]
 for i in 1...99 {
     archiveExtensions.insert(String(format: "%03d", i))
@@ -89,10 +91,14 @@ func runProcess(_ launchPath: String, _ args: [String]) -> (code: Int32, err: St
 
 // 捕获 stdout 的版本（探测加密状态需要读列表输出）
 func runProcessCapture(_ launchPath: String, _ args: [String]) -> (code: Int32, out: String, err: String) {
+    runProcessWithStdin(launchPath, args, stdinData: nil)
+}
+
+// 带可选 stdin 写入的版本（加密 DMG 的 hdiutil -stdinpass 需要）
+func runProcessWithStdin(_ launchPath: String, _ args: [String], stdinData: Data?) -> (code: Int32, out: String, err: String) {
     let task = Process()
     task.executableURL = URL(fileURLWithPath: launchPath)
     task.arguments = args
-    task.standardInput = FileHandle.nullDevice
     let outPipe = Pipe()
     task.standardOutput = outPipe
     let errPipe = Pipe()
@@ -100,6 +106,14 @@ func runProcessCapture(_ launchPath: String, _ args: [String]) -> (code: Int32, 
     var env = ProcessInfo.processInfo.environment
     env["LC_ALL"] = "en_US.UTF-8"
     task.environment = env
+    if let data = stdinData {
+        let inPipe = Pipe()
+        task.standardInput = inPipe
+        inPipe.fileHandleForWriting.write(data)
+        try? inPipe.fileHandleForWriting.close()
+    } else {
+        task.standardInput = FileHandle.nullDevice
+    }
     // run 之前注册，消灭「取消落在 run 与 register 之间」的逃逸窗口；
     // terminateAll 对未启动/已退出的进程有 isRunning 保护
     childTracker.register(task)
@@ -132,7 +146,7 @@ func runProcessCapture(_ launchPath: String, _ args: [String]) -> (code: Int32, 
 /// 无法判断（如没有 7zz）时返回 nil，调用方保守地弹出密码框。
 func probeAnyEncrypted(_ files: [String]) -> Bool? {
     guard let sz = sevenZipPath else { return nil }
-    let neverEncrypted: Set<String> = ["tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz"]
+    let neverEncrypted: Set<String> = ["tar", "gz", "tgz", "bz2", "tbz", "tbz2", "xz", "txz", "dmg"]
     let targets = files.filter { !neverEncrypted.contains(ext($0)) }
     if targets.isEmpty { return false }
     var results = [Bool](repeating: false, count: targets.count)
@@ -248,6 +262,13 @@ func backendsFor(path: String) -> [Backend] {
                 sevenZipArgs(outDir: outDir, password: pwd, path: p)
             }))
         }
+    case "iso", "wim":
+        // unar 不支持镜像格式，内置 7zz 直接处理
+        if let s = sevenZipPath {
+            list.append(Backend(name: sevenZipName, path: s, makeArgs: { outDir, pwd, p in
+                sevenZipArgs(outDir: outDir, password: pwd, path: p)
+            }))
+        }
     default:
         if let u = unarPath {
             list.append(Backend(name: "unar", path: u, makeArgs: { outDir, pwd, p in
@@ -308,6 +329,17 @@ func extractOne(_ path: String, password userPassword: String, deleteArchiveOnSu
     if backends.isEmpty {
         cleanupIfEmpty(outDir)
         return (false, outDir, "没有可用的解压后端，请安装：brew install unar 7zip")
+    }
+
+    // DMG 不走解压引擎链：hdiutil 挂载 → 拷贝 → 卸载
+    if ext(path) == "dmg" {
+        let displayName = (path as NSString).lastPathComponent
+        let r = extractDmgFile(path, outDir: outDir, password: userPassword, displayName: displayName)
+        if r.ok, deleteArchiveOnSuccess {
+            try? fm.removeItem(atPath: path)
+            logLine("🗑 已删除解压出的内部镜像 \(displayName)")
+        }
+        return (r.ok, outDir, r.message)
     }
 
     // 轮次规划：探测已有结论时只跑有意义的一轮，省掉注定失败的进程；
@@ -405,6 +437,44 @@ func extractOne(_ path: String, password userPassword: String, deleteArchiveOnSu
     cleanupIfEmpty(outDir)
     let detail = briefError(attempts.last?.err ?? "")
     return (false, outDir, detail.isEmpty ? "解压失败" : detail)
+}
+
+/// DMG：hdiutil 挂载（支持 AES 加密镜像的密码）→ ditto 拷贝内容 → 卸载。
+/// attach/copy 的任何失败路径都确保卸载并清理挂载点。
+func extractDmgFile(_ path: String, outDir: String, password: String, displayName: String) -> (ok: Bool, message: String?) {
+    let mountPoint = NSTemporaryDirectory() + "bzmount-" + UUID().uuidString
+    do {
+        try fm.createDirectory(atPath: mountPoint, withIntermediateDirectories: true)
+    } catch {
+        return (false, "无法创建挂载点：\(error.localizedDescription)")
+    }
+    logLine("解压 DMG \(displayName) | hdiutil 挂载 | 密码：\(password.isEmpty ? "无" : "已提供")")
+    var attachArgs = ["attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", mountPoint]
+    if !password.isEmpty { attachArgs.append("-stdinpass") }  // 不加此参数 hdiutil 会走交互提示，stdin 已关闭导致 attach canceled
+    attachArgs.append(path)
+    let r = runProcessWithStdin("/usr/bin/hdiutil", attachArgs,
+                                stdinData: password.isEmpty ? nil : password.data(using: .utf8))
+    guard r.code == 0 else {
+        try? fm.removeItem(atPath: mountPoint)
+        let err = briefError(r.err)
+        logLine("❌ hdiutil attach 退出码 \(r.code)：\(err)")
+        let lower = r.err.lowercased()
+        // hdiutil 的错误文案跟随系统本地化（中文系统输出「认证错误」等），中英文特征都要匹配
+        if password.isEmpty && (lower.contains("encrypt") || lower.contains("password") || lower.contains("canceled")
+                                || r.err.contains("认证") || r.err.contains("密码")) {
+            return (false, "该 DMG 可能已加密或需要许可确认，请重新解压时输入密码")
+        }
+        return (false, err.isEmpty ? "DMG 挂载失败" : err)
+    }
+    let copy = runProcess("/usr/bin/ditto", [mountPoint, outDir])
+    _ = runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-force"])
+    try? fm.removeItem(atPath: mountPoint)
+    if copy.code == 0 {
+        logLine("✅ 成功 \(displayName)")
+        return (true, nil)
+    }
+    logLine("❌ ditto 拷贝退出码 \(copy.code)：\(briefError(copy.err, maxLines: 1))")
+    return (false, briefError(copy.err).isEmpty ? "DMG 内容拷贝失败" : briefError(copy.err))
 }
 
 // 解压完全失败时删掉刚建的空输出文件夹，避免留下一堆空目录

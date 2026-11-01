@@ -6,7 +6,7 @@
 
 macOS 上的批量解压工具：在 Finder 里**选中多个压缩包 → 右键「打开方式」→ 批量解压 → 输一次密码**，全部解压完成。
 
-支持格式：zip、rar、7z、tar、gz、tgz、bz2、tbz、xz、txz、Z、lzma、cab。
+支持格式：zip、rar、7z、tar、gz、tgz、bz2、tbz、xz、txz、Z、lzma、cab、**dmg**（含 AES 加密镜像）、**iso**、**wim**、**apk / ipa / jar**（zip 容器）。
 
 ## 下载安装
 
@@ -58,6 +58,8 @@ macOS 上的批量解压工具：在 Finder 里**选中多个压缩包 → 右�
 
 - 密码通过命令行参数传给解压引擎（unar/7zz/unzip 均只支持这种方式），理论上同机的其他用户可用 `ps` 看到；日志中已刻意不记录密码
 - GBK 文件名修复是启发式：zh 系统环境下，文件名本身是西里尔字母（俄语等）的 zip 也会被误判为 GBK 乱码而重解（内容无损、文件名会被改写）；这是「GBK 误判」与「真俄语」在信息上无法完美区分的固有限制
+- Zstandard（.zst）暂不支持：内置的 7zz 与 unar 均不含 Zstandard 解码器
+- DMG 解压只读挂载后拷贝内容，不支持转换格式；带许可协议（EULA）的镜像会在汇总中提示失败
 
 ## 排查问题
 
@@ -78,6 +80,8 @@ macOS 上的批量解压工具：在 Finder 里**选中多个压缩包 → 右�
 | rar / 7z / cab | **内置 7zz** → unar → unrar |
 | zip | unar（自动修复 GBK 文件名乱码）→ **内置 7zz** → unzip |
 | tar / gz / bz2 / xz 等 | bsdtar（系统自带）→ unar → **内置 7zz** |
+| dmg | hdiutil 挂载拷贝（支持 AES 加密镜像密码） |
+| iso / wim | **内置 7zz** |
 
 若都没有内置引擎（自行构建且未 vendor），首次解压 rar/7z 时会弹窗询问是否通过 Homebrew 自动安装。
 

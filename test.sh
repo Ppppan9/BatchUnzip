@@ -207,6 +207,29 @@ mkdir -p "$T/collide"
 run_check "同目录同名 a.zip + a.7z 并行" 0 "$T" collide/a.zip collide/a.7z
 check "两个输出目录内容不串" "[ -n \"$(find "$T/collide/a" "$T/collide/a 2" -name m1.txt 2>/dev/null)\" ] && [ -n \"$(find "$T/collide/a" "$T/collide/a 2" -name m2.txt 2>/dev/null)\" ]"
 
+say "== 12. 镜像与新容器格式 =="
+mkdir -p "$T/dmgsrc" && echo dmg内容 > "$T/dmgsrc/d.txt"
+hdiutil create -srcfolder "$T/dmgsrc" -volname T1 -format UDZO -ov "$T/mirror.dmg" >/dev/null 2>&1
+run_check "普通 DMG 解压" 0 "$T" mirror.dmg
+check "DMG 内容正确" "[ \"\$(cat \"$T/mirror/d.txt\")\" = dmg内容 ]"
+printf 'dmgpass' | hdiutil create -srcfolder "$T/dmgsrc" -volname T2 -format UDZO -encryption AES-256 -stdinpass -ov "$T/enc.dmg" >/dev/null 2>&1
+if [ -f "$T/enc.dmg" ]; then
+    run_check "加密 DMG + 正确密码" 0 "$T" -p dmgpass enc.dmg
+    check "加密 DMG 内容正确" "[ \"\$(cat \"$T/enc/d.txt\")\" = dmg内容 ]"
+    run_check "加密 DMG 无密码报错" 1 "$T" enc.dmg
+    expect_fail_msg "提示可能加密" "可能已加密"
+else
+    say "  ⚠️ 加密 DMG 创建失败，跳过"
+fi
+mkdir -p "$T/wimsrc" && echo w内容 > "$T/wimsrc/w.txt"
+"$SEVENZZ" a -twim "$T/vol.wim" "$T/wimsrc" >/dev/null 2>&1 && [ -f "$T/vol.wim" ] && run_check "WIM 解压（内置 7zz）" 0 "$T" vol.wim && check "WIM 内容正确" "[ \"\$(cat \"$T/vol/wimsrc/w.txt\")\" = w内容 ]"
+mkdir -p "$T/isosrc" && echo i内容 > "$T/isosrc/i.txt"
+hdiutil makehybrid -iso -joliet -o "$T/disc.iso" "$T/isosrc" >/dev/null 2>&1 && [ -f "$T/disc.iso" ] && run_check "ISO 解压（内置 7zz）" 0 "$T" disc.iso && check "ISO 内容正确" "[ \"\$(cat \"$T/disc/i.txt\")\" = i内容 ]"
+mkdir -p "$T/jarsrc" && echo j内容 > "$T/jarsrc/j.txt"
+(cd "$T/jarsrc" && zip -q app.zip j.txt) && cp "$T/jarsrc/app.zip" "$T/app.ipa" && cp "$T/jarsrc/app.zip" "$T/prog.jar"
+run_check "ipa/jar（zip 容器）" 0 "$T" app.ipa prog.jar
+check "ipa/jar 内容正确" "[ \"\$(cat \"$T/app/j.txt\")\" = j内容 ] && [ \"\$(cat \"$T/prog/j.txt\")\" = j内容 ]"
+
 say ""
 say "========== 结果: 通过 $PASS / $((PASS+FAIL)) =========="
 rm -rf "$T"
