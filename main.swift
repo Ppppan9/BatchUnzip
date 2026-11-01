@@ -115,7 +115,9 @@ func runProcessCapture(_ launchPath: String, _ args: [String]) -> (code: Int32, 
             h.readabilityHandler = nil
             return
         }
-        errLock.lock(); errBuf.append(d); errLock.unlock()
+        errLock.lock()
+        if errBuf.count < 1_048_576 { errBuf.append(d) }  // 病态包防护：stderr 超 1MB 截断，防内存膨胀
+        errLock.unlock()
     }
     let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
     task.waitUntilExit()
@@ -266,6 +268,11 @@ func backendsFor(path: String) -> [Backend] {
 let logFilePath = NSHomeDirectory() + "/Library/Logs/BatchUnzip.log"
 let logMaxBytes = 1_000_000  // 超过 1MB 就清空重写，避免无限增长
 let logLock = NSLock()
+let logDateFormatter: DateFormatter = {
+    let df = DateFormatter()
+    df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    return df
+}()
 
 func logLine(_ s: String) {
     // 简单封顶：超限则截断日志（保留最近一半由覆写自然丢失，日志仅用于排障）
@@ -273,10 +280,7 @@ func logLine(_ s: String) {
        let size = attrs[.size] as? Int, size > logMaxBytes {
         try? fm.removeItem(atPath: logFilePath)
     }
-    let df = DateFormatter()
-    df.dateFormat = "yyyy-MM-dd HH:mm:ss"
-    let line = "[\(df.string(from: Date()))] \(s)\n"
-    guard let data = line.data(using: .utf8) else { return }
+    guard let data = "[\(logDateFormatter.string(from: Date()))] \(s)\n".data(using: .utf8) else { return }
     logLock.lock()
     defer { logLock.unlock() }
     if let h = FileHandle(forWritingAtPath: logFilePath) {
@@ -296,7 +300,7 @@ func briefError(_ err: String, maxLines: Int = 2) -> String {
 
 // MARK: - 单个解压（带密码/不带密码双轮尝试）
 
-func extractOne(_ path: String, password userPassword: String, deleteArchiveOnSuccess: Bool = false, onFileProgress: ((Int) -> Void)? = nil, shouldCancel: (() -> Bool)? = nil) -> (ok: Bool, outDir: String?, message: String?) {
+func extractOne(_ path: String, password userPassword: String, deleteArchiveOnSuccess: Bool = false, onFileProgress: ((Int) -> Void)? = nil, shouldCancel: (() -> Bool)? = nil, probeEncrypted: Bool? = nil) -> (ok: Bool, outDir: String?, message: String?) {
     guard let outDir = uniqueOutputDir(for: path) else {
         return (false, nil, "无法在原目录创建输出文件夹（可能没有写权限）")
     }
@@ -306,11 +310,17 @@ func extractOne(_ path: String, password userPassword: String, deleteArchiveOnSu
         return (false, outDir, "没有可用的解压后端，请安装：brew install unar 7zip")
     }
 
-    // 第一轮带用户密码（若有），第二轮不带密码：
-    // - 加密包+正确密码 → 第一轮成功
-    // - 未加密包（密码本无意义）→ 即使第一轮意外失败，第二轮也能成功
-    // - 加密包+错误密码 → 两轮都报密码类错误 → 明确报「密码错误」
-    let rounds: [String] = userPassword.isEmpty ? [""] : [userPassword, ""]
+    // 轮次规划：探测已有结论时只跑有意义的一轮，省掉注定失败的进程；
+    // 探测不了（nil）才用双轮自愈策略
+    let rounds: [String]
+    switch probeEncrypted {
+    case true:
+        rounds = userPassword.isEmpty ? [""] : [userPassword]
+    case false:
+        rounds = [""]
+    case nil:
+        rounds = userPassword.isEmpty ? [""] : [userPassword, ""]
+    }
     var attempts: [(backend: String, err: String)] = []
     let displayName = (path as NSString).lastPathComponent
     let cancelled = shouldCancel ?? { false }
@@ -530,7 +540,8 @@ func isContinuationVolume(_ path: String) -> Bool {
 // MARK: - 批量流程（GUI/CLI 共用：顶层并行解压 + 嵌套递归）
 
 let maxNestingDepth = 8
-let maxParallelExtractions = 4
+// 并行度自适应 CPU 核数：每个引擎进程自身已是多线程，槽位给一半核数并夹在 2~6
+let maxParallelExtractions = max(2, min(6, ProcessInfo.processInfo.activeProcessorCount / 2))
 
 // 线程安全的进度计数器（并行任务共享）
 final class ProgressCounter {
@@ -581,7 +592,8 @@ func processFiles(
     _ paths: [String],
     password: String,
     shouldCancel: @escaping () -> Bool,
-    onUpdate: @escaping (_ text: String, _ completed: Int, _ total: Int) -> Void
+    onUpdate: @escaping (_ text: String, _ completed: Int, _ total: Int) -> Void,
+    probeEncrypted: Bool? = nil
 ) -> [Outcome] {
     let counter = ProgressCounter()
     _ = counter.change(total: paths.count)
@@ -596,7 +608,13 @@ func processFiles(
         onUpdate(text, c, t)
     }
 
-    for (index, top) in paths.enumerated() {
+    // 长作业优先（LPT）：按文件体积降序提交，混合批次里大包先占住并行槽，缩短整体耗时。
+    // 结果仍按用户选择顺序存放（outcomes[index]），只影响启动顺序。
+    let sizes: [Int] = paths.map { (try? fm.attributesOfItem(atPath: $0)[.size] as? Int) ?? 0 }
+    let submitOrder = paths.indices.sorted { sizes[$0] > sizes[$1] }
+
+    for index in submitOrder {
+        let top = paths[index]
         group.enter()
         queue.async {
             defer { group.leave() }
@@ -612,7 +630,8 @@ func processFiles(
             defer { semaphore.signal() }
             let outcome = processTopLevel(top, password: password,
                                           shouldCancel: shouldCancel,
-                                          counter: counter, report: report)
+                                          counter: counter, report: report,
+                                          probeEncrypted: probeEncrypted)
             outcomesLock.lock()
             outcomes[index] = outcome
             outcomesLock.unlock()
@@ -628,7 +647,8 @@ func processTopLevel(
     password: String,
     shouldCancel: @escaping () -> Bool,
     counter: ProgressCounter,
-    report: @escaping (_ text: String) -> Void
+    report: @escaping (_ text: String) -> Void,
+    probeEncrypted: Bool? = nil
 ) -> Outcome {
     let topName = (top as NSString).lastPathComponent
     if isContinuationVolume(top) {
@@ -669,7 +689,8 @@ func processTopLevel(
                                    report("正在解压：\(name)（第 \(item.depth + 1) 层）· \(pct)%")
                                }
                            },
-                           shouldCancel: shouldCancel)
+                           shouldCancel: shouldCancel,
+                           probeEncrypted: probeEncrypted)
         _ = counter.change(completed: 1)
         if r.ok {
             okCount += 1
@@ -1053,16 +1074,17 @@ final class Coordinator: NSObject, NSApplicationDelegate {
         let probePanel = ProgressPanel(statusText: "正在检查加密状态…", cancellable: false)
         probePanel.show()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let needsPassword = probeAnyEncrypted(valid) ?? true
+            let probeResult = probeAnyEncrypted(valid)  // nil = 无法判断
             DispatchQueue.main.async {
                 probePanel.close()
-                self?.runBatch(valid, needsPassword: needsPassword)
+                self?.runBatch(valid, probeEncrypted: probeResult)
             }
         }
     }
 
-    private func runBatch(_ valid: [String], needsPassword: Bool) {
+    private func runBatch(_ valid: [String], probeEncrypted: Bool?) {
         // 智能免密：探测确认全部未加密时直接开解，不弹密码框
+        let needsPassword = probeEncrypted ?? true
         var password = ""
         if needsPassword {
             guard let pwd = promptPassword(count: valid.count) else {
@@ -1085,10 +1107,11 @@ final class Coordinator: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let outcomes = processFiles(valid, password: password,
-                                        shouldCancel: { self.cancelFlag.isCancelled }) { [weak self] text, done, total in
+                                        shouldCancel: { self.cancelFlag.isCancelled },
+                                        onUpdate: { [weak self] text, done, total in
                 guard let self else { return }
                 DispatchQueue.main.async { self.panel?.update(text: text, completed: done, total: total) }
-            }
+            }, probeEncrypted: probeEncrypted)
             DispatchQueue.main.async {
                 self.panel?.close()
                 self.panel = nil

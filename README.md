@@ -1,6 +1,6 @@
 # 批量解压（BatchUnzip）
 
-**English**: BatchUnzip is a native macOS batch archive extractor (single-file Swift/AppKit, no external dependencies in the app itself). Select multiple archives in Finder → Open With → BatchUnzip → enter the password once. Supports zip / rar / 7z / tar.gz and more, extracts nested archives recursively, runs up to 4 extractions in parallel. See [使用方法](#使用方法) and [下载安装](#下载安装) below. UI is in Chinese.
+**English**: BatchUnzip is a native macOS batch archive extractor (single-file Swift/AppKit, no external dependencies in the app itself). Select multiple archives in Finder → Open With → BatchUnzip → enter the password once. Supports zip / rar / 7z / tar.gz and more, extracts nested archives recursively, runs extractions in parallel (adaptive to CPU cores, longest-job-first scheduling). See [使用方法](#使用方法) and [下载安装](#下载安装) below. UI is in Chinese.
 
 ---
 
@@ -50,7 +50,7 @@ macOS 上的批量解压工具：在 Finder 里**选中多个压缩包 → 右�
 - 进度窗口：应用图标 + 「正在解压（3/12）」+ 当前文件名 + 数字进度条 + 解压中转轮指示；后台时 Dock 图标角标同步显示进度，完成后切走会弹跳提醒；批量开始前有「检查加密状态」短暂过渡
 - **大文件细粒度进度**：7zz 解压时解析其百分比输出，当前文件实时显示「· 45%」（每 5% 刷新）
 - **取消立即生效**：点取消会终止正在进行的解压子进程，且不会继续启动新的解压进程；CLI 模式收到 SIGTERM/SIGINT 同样先终止子进程再退出，不留孤儿
-- **并行解压**：多个压缩包之间 4 路并发（嵌套树内部保持串行）；实测 8×40MB 包从串行 8.4s 提速到并行 2.5s（约 3.4 倍）
+- **并行解压**：多个压缩包并发解压（嵌套树内部保持串行），并行度按 CPU 核数自适应（2~6 路），并采用**长作业优先调度**（大包先启动、小包填充空隙，混合批次实测比先来先解快约 36%）；实测 8×40MB 包从串行 8.4s 提速到并行 2.5s（约 3.4 倍）
 - **GBK 中文文件名自动修复**：unar 自动探测把 GBK 误判为其他编码时（典型特征是解出西里尔字母乱码名），自动改用 GBK 编码重解一次（仅 zip、仅中文系统环境；交换全程带备份与回滚，失败保留原结果）
 - 汇总弹窗显示总耗时，失败/警告项列出原因，可一键在 Finder 中打开所有输出目录
 
