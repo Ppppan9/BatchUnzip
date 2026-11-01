@@ -1,0 +1,4 @@
+build/
+.mimosa/
+.DS_Store
+*.zip
